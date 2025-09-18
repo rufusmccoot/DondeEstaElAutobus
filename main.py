@@ -118,16 +118,17 @@ def publish_to_mqtt(payload: dict):
     if MQTT_USER and MQTT_PASS:
         client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.connect(MQTT_SERVER, MQTT_PORT)
-    client.publish(MQTT_TOPIC, json.dumps(payload))
+    client.publish(MQTT_TOPIC, json.dumps(payload), retain=True)
     client.disconnect()
 
 def start_driver_and_login():
     options = Options()
     options.headless = True
-    options.add_argument("--window-size=1920,1080")
+#    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--headless=new")   
     # Suppress ChromeDriver logs
     options.add_argument('--log-level=3')
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
@@ -142,8 +143,14 @@ def main():
         print("Login failed.")
         return
 
+    shutdown_time = None  # Initialize shutdown timer
+
     try:
         while True:
+            # If shutdown is scheduled, check if it's time to exit
+            if shutdown_time and time.time() >= shutdown_time:
+                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Jittered exit timer complete. Exiting now.{RESET}")
+                break
             try:
                 print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - loadData(){RESET}")
                 rider_info = get_rider_info_via_loadData(driver)
@@ -152,6 +159,12 @@ def main():
                     print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Result: 'childBuses': {rider_info['payload']['childBuses']}{RESET}")
                     payload = extract_mqtt_payload(rider_info.get("payload", {}))
                     publish_to_mqtt(payload)
+
+                    # If bus is past stop and shutdown hasn't been scheduled yet, schedule it.
+                    if payload.get("dist") > 4.9 and payload.get("etaMsg") == "past stop" and not shutdown_time:
+                        exit_delay = random.randint(60, 360)
+                        shutdown_time = time.time() + exit_delay
+                        print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Bus is past stop. Shutdown initiated. Will exit in approx {exit_delay // 60} minutes.{RESET}")
                 else:
                     print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - No valid payload found. Details: {rider_info}{RESET}")
 
