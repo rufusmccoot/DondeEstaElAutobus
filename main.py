@@ -4,9 +4,12 @@ import random
 import json
 import traceback
 
+import threading
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from selenium import webdriver
+from flask import Flask, jsonify, send_from_directory
+from flask_cors import CORS
 from paho.mqtt.client import CallbackAPIVersion
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -28,6 +31,11 @@ MQTT_PORT = int(os.getenv("mqtt_port", 1883))
 MQTT_USER = os.getenv("mqtt_userId")
 MQTT_PASS = os.getenv("mqtt_password")
 MQTT_TOPIC = os.getenv("mqtt_topic")
+MQTT_WS_PORT = int(os.getenv("mqtt_ws_port", 1884)) # Port for MQTT over WebSockets
+
+
+
+
 
 def login(driver) -> str:
     """
@@ -45,7 +53,9 @@ def login(driver) -> str:
     driver.find_element(By.NAME, "email").send_keys(WTB_USER)
     driver.find_element(By.NAME, "pw").send_keys(WTB_PASS)
     WebDriverWait(driver, 20).until(lambda d: d.find_element(By.ID, "token").get_attribute("value"))
-    driver.find_element(By.NAME, "commit").click()
+    # Use a JS click to bypass the overlapping footer element
+    commit_button = driver.find_element(By.NAME, "commit")
+    driver.execute_script("arguments[0].click();", commit_button)
     time.sleep(3)
     if "rider.php" not in driver.current_url:
         return ""
@@ -137,7 +147,45 @@ def start_driver_and_login():
     session_id = login(driver)
     return driver, session_id
 
+# --- Flask Web Server Setup ---
+app = Flask(__name__, static_folder='frontend')
+CORS(app)
+
+
+
+@app.route('/api/config')
+def get_config():
+    """Provide MQTT config to the frontend."""
+    return jsonify({
+        'mqtt_host': MQTT_SERVER,
+        'mqtt_port': MQTT_WS_PORT,
+        'mqtt_user': MQTT_USER,
+        'mqtt_pass': MQTT_PASS,
+        'mqtt_topic': MQTT_TOPIC
+    })
+
+@app.route('/')
+def serve_index():
+    """Serve the main index.html file."""
+    return send_from_directory('frontend', 'index.html')
+
+@app.route('/<path:path>')
+def serve_static(path):
+    """Serve other static files from the frontend directory."""
+    return send_from_directory('frontend', path)
+
+def run_flask_app():
+    # Running on 0.0.0.0 makes it accessible on the network
+    # Use a different port like 5001 to avoid conflicts
+    app.run(host='0.0.0.0', port=5001, debug=False)
+
 def main():
+    # Start the Flask server in a daemon thread
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True
+    flask_thread.start()
+    print(f"{CYAN}Web server started at http://<your_ip>:5001{RESET}")
+
     driver, session_id = start_driver_and_login()
     if not session_id:
         print("Login failed.")

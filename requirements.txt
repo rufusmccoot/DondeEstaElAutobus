@@ -3,4 +3,6 @@ paho-mqtt
 python-dotenv
 selenium
 webdriver-manager
+flask
+flask-cors
 pycurl

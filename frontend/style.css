@@ -1,0 +1,30 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden; /* Prevent scrollbars */
+    font-family: sans-serif;
+}
+
+#map {
+    height: 100%;
+    width: 100%;
+    background-color: #f0f0f0;
+}
+
+#eta-banner {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000; /* Ensure it's on top of the map */
+    background-color: rgba(40, 40, 40, 0.85); /* Dark background */
+    color: #ffffff; /* Light text */
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 1.5em;
+    font-weight: bold;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5); /* Stronger shadow for dark bg */
+    white-space: nowrap;
+}
