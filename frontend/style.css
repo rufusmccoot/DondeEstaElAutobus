@@ -28,3 +28,28 @@ body, html {
     box-shadow: 0 2px 8px rgba(0,0,0,0.5); /* Stronger shadow for dark bg */
     white-space: nowrap;
 }
+
+#toggle-polling-btn {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    z-index: 1000;
+    padding: 10px 15px;
+    font-size: 1em;
+    font-weight: bold;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    transition: background-color 0.3s, color 0.3s;
+}
+
+#toggle-polling-btn.active {
+    background-color: #28a745; /* Green */
+    color: white;
+}
+
+#toggle-polling-btn.paused {
+    background-color: #dc3545; /* Red */
+    color: white;
+}

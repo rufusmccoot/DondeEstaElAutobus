@@ -1,14 +1,14 @@
 import os
+import threading
 import time
+import traceback
 import random
 import json
-import traceback
-
-import threading
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from selenium import webdriver
 from flask import Flask, jsonify, send_from_directory
+from flask_socketio import SocketIO
 from flask_cors import CORS
 from paho.mqtt.client import CallbackAPIVersion
 from selenium.webdriver.chrome.options import Options
@@ -150,15 +150,44 @@ def start_driver_and_login():
 # --- Flask Web Server Setup ---
 app = Flask(__name__, static_folder='frontend')
 CORS(app)
+socketio = SocketIO(app, async_mode='gevent')
 
+# --- Polling Control ---
+polling_enabled = threading.Event()
+polling_enabled.set() # Start with polling enabled
+
+
+# --- Socket.IO Event Handlers ---
+@socketio.on('connect')
+def handle_connect():
+    # Send the initial status when a new client connects
+    print(f"{CYAN}Client connected. Sending initial polling status.{RESET}")
+    socketio.emit('status_update', {'polling_active': polling_enabled.is_set()})
+
+@socketio.on('toggle_polling')
+def handle_toggle_polling():
+    """Toggle the polling loop on and off."""
+    if polling_enabled.is_set():
+        polling_enabled.clear() # Pause polling
+        print(f"{CYAN}Polling paused by UI request.{RESET}")
+    else:
+        polling_enabled.set() # Resume polling
+        print(f"{CYAN}Polling resumed by UI request.{RESET}")
+    # Broadcast the new status to all clients
+    socketio.emit('status_update', {'polling_active': polling_enabled.is_set()})
+
+@socketio.on('request_status')
+def handle_request_status():
+    """Send the current polling status to the requesting client."""
+    socketio.emit('status_update', {'polling_active': polling_enabled.is_set()})
 
 
 @app.route('/api/config')
 def get_config():
-    """Provide MQTT config to the frontend."""
+    """Provide MQTT config to the frontend (for internal HA use, if needed)."""
     return jsonify({
         'mqtt_host': MQTT_SERVER,
-        'mqtt_port': MQTT_WS_PORT,
+        'mqtt_port': MQTT_PORT, # Standard port, not WS
         'mqtt_user': MQTT_USER,
         'mqtt_pass': MQTT_PASS,
         'mqtt_topic': MQTT_TOPIC
@@ -177,7 +206,51 @@ def serve_static(path):
 def run_flask_app():
     # Running on 0.0.0.0 makes it accessible on the network
     # Use a different port like 5001 to avoid conflicts
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    print("Starting Flask-SocketIO server...")
+    socketio.run(app, host='0.0.0.0', port=5001, debug=False)
+
+def polling_loop(driver):
+    """The main polling loop to be run in a separate thread."""
+    shutdown_time = None  # Initialize shutdown timer
+
+    while True:
+        polling_enabled.wait(timeout=5.0)
+        if not polling_enabled.is_set():
+            continue
+        # If shutdown is scheduled, check if it's time to exit
+        if shutdown_time and time.time() >= shutdown_time:
+            print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Jittered exit timer complete. Exiting now.{RESET}")
+            break
+        try:
+            print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - loadData(){RESET}")
+            rider_info = get_rider_info_via_loadData(driver)
+
+            if rider_info and 'payload' in rider_info and 'childBuses' in rider_info['payload']:
+                payload = extract_mqtt_payload(rider_info.get("payload", {}))
+                
+                # 1. Publish to MQTT for Home Assistant's internal use
+                publish_to_mqtt(payload)
+                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Pushed to MQTT{RESET}")
+
+                # 2. Push data to all connected web clients via Socket.IO
+                socketio.emit('bus_update', payload)
+                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Pushed to WebSockets{RESET}")
+
+                # If bus is past stop and shutdown hasn't been scheduled yet, schedule it.
+                if payload.get("dist") > 4.9 and payload.get("etaMsg") == "past stop" and not shutdown_time:
+                    exit_delay = random.randint(60, 360)
+                    shutdown_time = time.time() + exit_delay
+                    print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Bus is past stop. Shutdown initiated. Will exit in approx {exit_delay // 60} minutes.{RESET}")
+            else:
+                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - No valid payload found. Details: {rider_info}{RESET}")
+
+        except Exception as e:
+            print(f"An error occurred during polling: {e}")
+            traceback.print_exc()
+            print("Polling loop will continue, but may fail if browser state is corrupt.")
+
+        sleep_time = 19 + random.uniform(-2, 2)
+        time.sleep(sleep_time)
 
 def main():
     # Start the Flask server in a daemon thread
@@ -186,57 +259,31 @@ def main():
     flask_thread.start()
     print(f"{CYAN}Web server started at http://<your_ip>:5001{RESET}")
 
-    driver, session_id = start_driver_and_login()
-    if not session_id:
-        print("Login failed.")
-        return
-
-    shutdown_time = None  # Initialize shutdown timer
-
+    driver = None
     try:
-        while True:
-            # If shutdown is scheduled, check if it's time to exit
-            if shutdown_time and time.time() >= shutdown_time:
-                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Jittered exit timer complete. Exiting now.{RESET}")
-                break
-            try:
-                print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - loadData(){RESET}")
-                rider_info = get_rider_info_via_loadData(driver)
+        driver, session_id = start_driver_and_login()
+        if not session_id:
+            print("Login failed. Exiting.")
+            return
 
-                if rider_info and 'payload' in rider_info and 'childBuses' in rider_info['payload']:
-                    print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Result: 'childBuses': {rider_info['payload']['childBuses']}{RESET}")
-                    payload = extract_mqtt_payload(rider_info.get("payload", {}))
-                    publish_to_mqtt(payload)
+        # Start the polling loop in a separate thread
+        polling_thread = threading.Thread(target=polling_loop, args=(driver,))
+        polling_thread.daemon = True # This is the crucial change
+        polling_thread.start()
 
-                    # If bus is past stop and shutdown hasn't been scheduled yet, schedule it.
-                    if payload.get("dist") > 4.9 and payload.get("etaMsg") == "past stop" and not shutdown_time:
-                        exit_delay = random.randint(60, 360)
-                        shutdown_time = time.time() + exit_delay
-                        print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Bus is past stop. Shutdown initiated. Will exit in approx {exit_delay // 60} minutes.{RESET}")
-                else:
-                    print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - No valid payload found. Details: {rider_info}{RESET}")
+        # Keep the main thread alive. The join() is removed, we'll just sleep.
+        while polling_thread.is_alive():
+            polling_thread.join(timeout=1.0) # Wait for 1s at a time
 
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                traceback.print_exc()
-                print("Attempting to restart browser and re-login...")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-                driver, session_id = start_driver_and_login()
-                if not driver:
-                    print("Failed to restart and login. Exiting.")
-                    return
-
-            sleep_time = 19 + random.uniform(-2, 2)
-            time.sleep(sleep_time)
-
+    except KeyboardInterrupt:
+        print("\nCtrl+C detected. Shutting down.")
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        print("Cleaning up resources...")
+        if driver:
+            try:
+                driver.quit()
+            except Exception as e:
+                print(f"Error quitting driver: {e}")
 
 if __name__ == "__main__":
     main()

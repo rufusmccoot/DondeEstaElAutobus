@@ -1,5 +1,5 @@
 // --- Map Initialization ---
-const map = L.map('map').setView([40.7128, -74.0060], 13); // Default view (New York)
+const map = L.map('map').setView([40.7128, -74.0060], 13); // Default view
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd',
@@ -7,13 +7,14 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 const etaBanner = document.getElementById('eta-banner');
+const toggleBtn = document.getElementById('toggle-polling-btn');
 
 // --- Custom Icons ---
 const createIcon = (url) => L.icon({
     iconUrl: url,
-    iconSize: [40, 40],       // Size of the icon
-    iconAnchor: [20, 40],     // Point of the icon which will correspond to marker's location
-    popupAnchor: [0, -40]     // Point from which the popup should open relative to the iconAnchor
+    iconSize: [50, 50],
+    iconAnchor: [25, 25],
+    popupAnchor: [0, -25]
 });
 
 const icons = {
@@ -35,76 +36,64 @@ const markers = {
 const busPath = [];
 const breadcrumbTrail = L.polyline(busPath, { color: '#007bff', weight: 5, opacity: 0.7 }).addTo(map);
 
-// --- MQTT and App Logic ---
-let mqttClient;
-let mqttConfig;
+// --- Socket.IO Connection ---
 
-async function initializeApp() {
-    etaBanner.textContent = 'Loading configuration...';
-    try {
-        const response = await fetch('/api/config');
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        mqttConfig = await response.json();
-        console.log('Configuration loaded:', mqttConfig);
-        
-        setupMqttClient();
-    } catch (error) {
-        console.error('Failed to load configuration:', error);
-        etaBanner.textContent = 'Error loading config. Check console.';
-        etaBanner.style.backgroundColor = '#ffcccc';
-    }
-}
+// Connect to the Socket.IO server. 
+// It will automatically connect to the host that served the page.
+// For Ingress, the path needs to be specified correctly.
+const socketPath = window.location.pathname.replace(/\/$/, '') + '/socket.io';
+console.log(`Connecting to Socket.IO with path: ${socketPath}`);
 
-function setupMqttClient() {
-    mqttClient = new Paho.MQTT.Client(mqttConfig.mqtt_host, mqttConfig.mqtt_port, `bus-map-client-${Math.random()}`);
-    mqttClient.onConnectionLost = onConnectionLost;
-    mqttClient.onMessageArrived = onMessageArrived;
-    connectToMqtt();
-}
+const socket = io(window.location.origin, {
+    path: socketPath
+});
 
-function connectToMqtt() {
-    console.log(`Connecting to MQTT broker at ${mqttConfig.mqtt_host}:${mqttConfig.mqtt_port}...`);
-    mqttClient.connect({
-        userName: mqttConfig.mqtt_user,
-        password: mqttConfig.mqtt_pass,
-        onSuccess: onConnectSuccess,
-        onFailure: onConnectFailure,
-        useSSL: false // We are not using SSL on the local network
-    });
-}
-
-function onConnectSuccess() {
-    console.log('Connected to MQTT!');
+socket.on('connect', () => {
+    console.log('Socket.IO connected successfully!');
     etaBanner.textContent = 'Connected. Waiting for data...';
-    etaBanner.style.backgroundColor = '#ccffcc';
-    mqttClient.subscribe(mqttConfig.mqtt_topic);
-}
+    // When we connect (or reconnect), ask the server for the current polling status
+    socket.emit('request_status');
+});
 
-function onConnectFailure(message) {
-    console.error('Connection failed:', message.errorMessage);
-    etaBanner.textContent = 'MQTT Connection Failed. Retrying in 5s...';
-    etaBanner.style.backgroundColor = '#ffcccc';
-    setTimeout(connectToMqtt, 5000);
-}
-
-function onConnectionLost(responseObject) {
-    if (responseObject.errorCode !== 0) {
-        console.log('Connection lost:', responseObject.errorMessage);
-        etaBanner.textContent = 'Connection Lost. Reconnecting...';
-        etaBanner.style.backgroundColor = '#ffcccc';
-        connectToMqtt();
+// --- UI Event Handlers ---
+function updatePollingButton(isActive) {
+    if (isActive) {
+        toggleBtn.textContent = 'Polling Active';
+        toggleBtn.className = 'active';
+    } else {
+        toggleBtn.textContent = 'Polling Paused';
+        toggleBtn.className = 'paused';
     }
 }
 
-function onMessageArrived(message) {
+toggleBtn.addEventListener('click', () => {
+    console.log('Toggle button clicked.');
+    socket.emit('toggle_polling');
+});
+
+// Listen for status updates from the server
+socket.on('status_update', (data) => {
+    console.log('Received status update:', data);
+    updatePollingButton(data.polling_active);
+});
+
+socket.on('disconnect', () => {
+    console.log('Socket.IO disconnected.');
+    etaBanner.textContent = 'Connection Lost. Retrying...';
+});
+
+socket.on('connect_error', (err) => {
+    console.error('Socket.IO connection error:', err);
+    etaBanner.textContent = 'Connection Error. Check console.';
+});
+
+// Listen for our custom 'bus_update' event
+socket.on('bus_update', (data) => {
     try {
-        const data = JSON.parse(message.payloadString);
-        console.log('Received data:', data);
+        console.log('Received bus update:', data);
 
         etaBanner.textContent = data.etaMsg || 'No ETA message';
-        etaBanner.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
+        etaBanner.style.backgroundColor = 'rgba(40, 40, 40, 0.85)'; // Reset to dark
 
         const newLatLng = [data.bus_lat, data.bus_lon];
 
@@ -122,24 +111,14 @@ function onMessageArrived(message) {
         markers.stop.setLatLng([data.stop_lat, data.stop_lon]);
         markers.school.setLatLng([data.school_lat, data.school_lon]);
 
-        let bounds;
-        const busLatLng = [data.bus_lat, data.bus_lon];
-        const homeLatLng = [data.home_lat, data.home_lon];
-        const stopLatLng = [data.stop_lat, data.stop_lon];
-        const schoolLatLng = [data.school_lat, data.school_lon];
-
-        if (data.bus_lat && data.home_lat) {
-            if (data.etaMsg && data.etaMsg.toLowerCase().includes('approaching')) {
-                bounds = L.latLngBounds([busLatLng, homeLatLng, stopLatLng, schoolLatLng]);
-            } else {
-                bounds = L.latLngBounds([busLatLng, homeLatLng, stopLatLng]);
-            }
-            map.fitBounds(bounds, { padding: [50, 50] });
+        // Auto-zoom logic
+        let bounds = L.latLngBounds([newLatLng, [data.home_lat, data.home_lon], [data.stop_lat, data.stop_lon]]);
+        if (data.etaMsg && data.etaMsg.toLowerCase().includes('approaching')) {
+            bounds.extend([data.school_lat, data.school_lon]);
         }
+        map.fitBounds(bounds, { padding: [50, 50] });
+
     } catch (e) {
         console.error('Error processing message:', e);
     }
-}
-
-// Start the application
-initializeApp();
+});
