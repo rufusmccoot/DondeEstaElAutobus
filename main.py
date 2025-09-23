@@ -6,6 +6,7 @@ import json
 import re
 import requests
 import paho.mqtt.client as mqtt
+import shutil
 from dotenv import load_dotenv
 from selenium import webdriver
 from paho.mqtt.client import CallbackAPIVersion
@@ -35,7 +36,8 @@ MQTT_TOPIC = os.getenv("mqtt_topic")
 
 # --- Core Functions ---
 
-def publish_to_mqtt(payload):
+def publish_to_mqtt(payload)\
+    
     """Publishes a JSON payload to the configured MQTT topic."""
     client = mqtt.Client(CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_PASS:
@@ -94,8 +96,8 @@ def polling_loop(session_id):
                 print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Pushed to MQTT.{RESET}")
 
                 bus_dist = mqtt_payload.get("dist")
-                if bus_dist is not None and bus_dist > 4.9 and mqtt_payload.get("etaMsg") == "past stop" and not shutdown_time:
-                    exit_delay = random.randint(60, 360)
+                if bus_dist is not None and bus_dist > 1.9 and mqtt_payload.get("etaMsg") == "past stop" and not shutdown_time:
+                    exit_delay = random.randint(30, 180)
                     shutdown_time = time.time() + exit_delay
                     print(f"{CYAN}{time.strftime('%Y-%m-%d %H:%M:%S')} - Bus is past stop. Scheduling shutdown in ~{exit_delay // 60} minutes.{RESET}")
             else:
@@ -119,14 +121,19 @@ def main():
         chrome_options.add_argument("--headless")
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36')
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        print("Chrome driver initialized.")
         
         driver.get("https://wheresthebus.com/au_login.php")
         
         email_field = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "email")))
         email_field.send_keys(WTB_USER)
         driver.find_element(By.ID, "pw").send_keys(WTB_PASS)
-        time.sleep(1)
-        driver.find_element(By.NAME, "commit").click()
+        
+        time.sleep(1) # Pause to allow page to settle
+        
+        print("Clicking login button via JavaScript to avoid interception...")
+        login_button = driver.find_element(By.NAME, "commit")
+        driver.execute_script("arguments[0].click();", login_button)
         
         WebDriverWait(driver, 15).until(EC.url_contains("rider.php"))
         print("Selenium login successful.")
@@ -159,6 +166,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nCtrl+C detected. Shutting down.")
-    finally:
-        print("Cleaning up resources...")
-        quit()
